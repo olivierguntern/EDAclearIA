@@ -5,23 +5,33 @@ from pathlib import Path
 import pandas as pd
 
 
-def analyze(path: Path) -> None:
-    """Charge un CSV et affiche un résumé statistique."""
+def analyze(path: Path) -> str:
+    """Charge un CSV, affiche et retourne un résumé statistique."""
     df = pd.read_csv(path)
 
-    print(f"\n=== EDAclearIA : {path.name} ===\n")
-    print(f"Dimensions : {df.shape[0]} lignes × {df.shape[1]} colonnes\n")
+    lines = []
 
-    print("--- Types de colonnes ---")
-    print(df.dtypes.to_string())
+    lines.append(f"\n=== EDAclearIA : {path.name} ===\n")
+    lines.append(f"Dimensions : {df.shape[0]} lignes × {df.shape[1]} colonnes\n")
 
-    print("\n--- Valeurs manquantes ---")
+    lines.append("--- Types de colonnes ---")
+    lines.append(df.dtypes.to_string())
+
+    lines.append("\n--- Valeurs manquantes ---")
     missing = df.isnull().sum()
     missing = missing[missing > 0]
     if missing.empty:
-        print("Aucune valeur manquante.")
+        lines.append("Aucune valeur manquante.")
     else:
-        print(missing.to_string())
+        lines.append(missing.to_string())
 
-    print("\n--- Statistiques descriptives ---")
-    print(df.describe(include="all").to_string())
+    lines.append("\n--- Doublons ---")
+    n_dup = df.duplicated().sum()
+    lines.append(f"{n_dup} ligne(s) dupliquée(s).")
+
+    lines.append("\n--- Statistiques descriptives ---")
+    lines.append(df.describe(include="all").to_string())
+
+    summary = "\n".join(lines)
+    print(summary)
+    return summary
