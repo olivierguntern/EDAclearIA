@@ -14,10 +14,11 @@ Usage rapide :
 from __future__ import annotations
 
 import csv
+import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import numpy as np
@@ -97,16 +98,41 @@ class SpeedDetector:
         self._model = YOLO(model_path)
         self._tracks: dict[int, _TrackState] = {}
         self._results: list[SpeedResult] = []
+        self._stop_event = threading.Event()
+        self._pause_event = threading.Event()
+        self._pause_event.set()  # démarre non-pausé
 
     # ------------------------------------------------------------------
     # API principale
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Contrôle du flux (appelable depuis un autre thread)
+    # ------------------------------------------------------------------
+
+    def stop(self) -> None:
+        """Interrompt le traitement en cours."""
+        self._stop_event.set()
+
+    def pause(self) -> None:
+        """Met en pause le traitement."""
+        self._pause_event.clear()
+
+    def resume(self) -> None:
+        """Reprend le traitement après une pause."""
+        self._pause_event.set()
+
+    @property
+    def is_paused(self) -> bool:
+        return not self._pause_event.is_set()
 
     def process_video(
         self,
         input_path: str | Path,
         output: Optional[str | Path] = None,
         save_csv: Optional[str | Path] = None,
+        frame_callback: Optional[Callable[[np.ndarray, int, int], None]] = None,
+        result_callback: Optional[Callable[["SpeedResult"], None]] = None,
     ) -> list[SpeedResult]:
         """Traite une vidéo et retourne la liste des mesures de vitesse.
 
@@ -114,6 +140,9 @@ class SpeedDetector:
             input_path: Chemin de la vidéo source.
             output: Chemin de la vidéo annotée à sauvegarder (optionnel).
             save_csv: Chemin du fichier CSV résultats (optionnel).
+            frame_callback: Appelé après chaque frame annotée avec
+                ``(frame_bgr, frame_idx, total_frames)``. Utilisé par le GUI.
+            result_callback: Appelé à chaque nouvelle mesure de vitesse.
 
         Returns:
             Liste de :class:`SpeedResult` (un par véhicule mesuré).
@@ -134,20 +163,31 @@ class SpeedDetector:
         writer = self._make_writer(output, fps, width, height) if output else None
         self._tracks.clear()
         self._results.clear()
+        self._stop_event.clear()
+        self._pause_event.set()
 
         frame_idx = 0
         t0 = time.time()
 
         try:
             while True:
+                if self._stop_event.is_set():
+                    break
+
+                # Blocage si pause active
+                self._pause_event.wait()
+
                 ok, frame = cap.read()
                 if not ok:
                     break
 
-                annotated = self._process_frame(frame, frame_idx, fps)
+                annotated = self._process_frame(frame, frame_idx, fps, result_callback)
 
                 if writer:
                     writer.write(annotated)
+
+                if frame_callback:
+                    frame_callback(annotated, frame_idx, total_frames)
 
                 if self.display:
                     cv2.imshow("Speed Detection — q pour quitter", annotated)
@@ -178,7 +218,13 @@ class SpeedDetector:
     # Traitement par frame
     # ------------------------------------------------------------------
 
-    def _process_frame(self, frame: np.ndarray, frame_idx: int, fps: float) -> np.ndarray:
+    def _process_frame(
+        self,
+        frame: np.ndarray,
+        frame_idx: int,
+        fps: float,
+        result_callback: Optional[Callable[["SpeedResult"], None]] = None,
+    ) -> np.ndarray:
         annotated = frame.copy()
         h, w = frame.shape[:2]
 
@@ -234,6 +280,8 @@ class SpeedDetector:
                     )
                     self._results.append(result)
                     print(f"  [ID {track_id}] {state.speed_kmh} km/h  (t={result.timestamp_s}s)")
+                    if result_callback:
+                        result_callback(result)
 
                 # Dessin boîte englobante
                 color = (

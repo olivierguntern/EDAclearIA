@@ -2,7 +2,8 @@
 
 Modes disponibles :
   --file  <chemin.csv>   : Analyse exploratoire CSV guidée par l'IA.
-  --video <chemin.mp4>   : Détection et mesure de vitesse de véhicules.
+  --video <chemin.mp4>   : Détection et mesure de vitesse de véhicules (CLI).
+  --gui                  : Interface graphique PyQt6 (vidéo + mesures en temps réel).
 """
 
 import argparse
@@ -103,15 +104,26 @@ def main() -> None:
         help="Afficher la fenêtre de prévisualisation (nécessite un écran)",
     )
 
+    # --- Mode GUI ---
+    gui_group = parser.add_argument_group("Mode interface graphique")
+    gui_group.add_argument(
+        "--gui", action="store_true",
+        help="Ouvre l'interface graphique PyQt6 (vidéo + mesures en temps réel)",
+    )
+
     args = parser.parse_args()
 
-    if args.file and args.video:
-        parser.error("Spécifiez --file OU --video, pas les deux.")
+    modes = [bool(args.file), bool(args.video), args.gui]
+    if sum(modes) > 1:
+        parser.error("Spécifiez un seul mode : --file, --video ou --gui.")
 
     if args.file:
         _run_eda(args)
     elif args.video:
         _run_speed(args)
+    elif args.gui:
+        from src.gui import run_gui  # noqa: PLC0415
+        run_gui()
     else:
         parser.print_help()
 

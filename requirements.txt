@@ -8,3 +8,5 @@ pytest>=8.0
 # Détection de vitesse vidéo
 ultralytics>=8.2
 opencv-python>=4.9
+# Interface graphique
+PyQt6>=6.6
