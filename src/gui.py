@@ -37,10 +37,10 @@ except ImportError as exc:
 class VideoWorker(QObject):
     """Tourne dans un QThread et émet des signaux vers le thread principal."""
 
-    frame_ready = pyqtSignal(QImage)                       # frame annotée (BGR→RGB)
-    result_ready = pyqtSignal(int, float, float, str, str) # (track_id, speed_kmh, timestamp_s, vehicle_type, wall_time)
-    progress_updated = pyqtSignal(int, int)                # (frame_idx, total_frames)
-    finished = pyqtSignal(int)                             # nb de mesures au total
+    frame_ready = pyqtSignal(QImage)                              # frame annotée (BGR→RGB)
+    result_ready = pyqtSignal(int, float, float, str, str, str, str)  # (track_id, speed_kmh, timestamp_s, vehicle_type, wall_time, photo_path, plate_text)
+    progress_updated = pyqtSignal(int, int)                       # (frame_idx, total_frames)
+    finished = pyqtSignal(int)                                    # nb de mesures au total
     error_occurred = pyqtSignal(str)
 
     # Intervalle minimum entre deux frames affichées (s) → 30 fps max
@@ -56,6 +56,7 @@ class VideoWorker(QObject):
         speed_limit_kmh: float,
         conf: float,
         output_path: Optional[str] = None,
+        captures_dir: Optional[str] = None,
     ) -> None:
         super().__init__()
         self._video_path = video_path
@@ -66,6 +67,7 @@ class VideoWorker(QObject):
         self._speed_limit_kmh = speed_limit_kmh
         self._conf = conf
         self._output_path = output_path
+        self._captures_dir = captures_dir
         self._detector = None
         self._last_display_time = 0.0
 
@@ -97,6 +99,7 @@ class VideoWorker(QObject):
                 speed_limit_kmh=self._speed_limit_kmh,
                 conf=self._conf,
                 display=False,
+                captures_dir=self._captures_dir,
             )
 
             results = self._detector.process_video(
@@ -134,6 +137,8 @@ class VideoWorker(QObject):
             result.timestamp_s,
             result.vehicle_type,
             result.wall_time,
+            result.photo_path,
+            result.plate_text,
         )
 
 
@@ -155,6 +160,8 @@ class SpeedDetectionWindow(QMainWindow):
         self._speeds: list[float] = []
         self._alert_count = 0
         self._output_path: Optional[str] = None
+        self._captures_dir: Optional[str] = None
+        self._row_photos: list[str] = []  # photo_path par ligne du tableau
 
         self._build_ui()
         self._connect_actions()
@@ -183,9 +190,13 @@ class SpeedDetectionWindow(QMainWindow):
         self._btn_save_video.setToolTip("Activer l'enregistrement de la vidéo annotée")
         self._btn_save_video.setCheckable(True)
 
+        self._btn_captures = QPushButton("📷 Captures")
+        self._btn_captures.setToolTip("Activer la sauvegarde des photos véhicules + lecture de plaque")
+        self._btn_captures.setCheckable(True)
+
         for btn in (
             self._btn_open, self._btn_start, self._btn_pause,
-            self._btn_stop, self._btn_export, self._btn_save_video,
+            self._btn_stop, self._btn_export, self._btn_save_video, self._btn_captures,
         ):
             tb.addWidget(btn)
 
@@ -270,7 +281,7 @@ class SpeedDetectionWindow(QMainWindow):
 
         # --- Panneau droit : stats + historique ----
         right = QWidget()
-        right.setMaximumWidth(340)
+        right.setMaximumWidth(460)
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(4, 4, 4, 4)
 
@@ -296,17 +307,30 @@ class SpeedDetectionWindow(QMainWindow):
             stats_layout.addLayout(row)
         right_layout.addWidget(stats_box)
 
+        # Aperçu photo véhicule (affiché au clic d'une ligne)
+        photo_box = QGroupBox("Photo véhicule")
+        photo_layout = QVBoxLayout(photo_box)
+        self._photo_preview = QLabel("Cliquez une ligne pour voir la photo")
+        self._photo_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._photo_preview.setFixedHeight(160)
+        self._photo_preview.setStyleSheet(
+            "background: #0d0d1a; color: #555; border-radius: 4px; font-size: 11px;"
+        )
+        photo_layout.addWidget(self._photo_preview)
+        right_layout.addWidget(photo_box)
+
         # Historique des mesures
         hist_box = QGroupBox("Historique des mesures")
         hist_layout = QVBoxLayout(hist_box)
-        self._table = QTableWidget(0, 6)
-        self._table.setHorizontalHeaderLabels(["N°", "ID", "Type", "Heure", "km/h", "Alerte"])
+        self._table = QTableWidget(0, 7)
+        self._table.setHorizontalHeaderLabels(["N°", "ID", "Type", "Heure", "km/h", "Plaque", "Alerte"])
         self._table.horizontalHeader().setStretchLastSection(True)
-        self._table.setColumnWidth(0, 35)
-        self._table.setColumnWidth(1, 40)
-        self._table.setColumnWidth(2, 65)
-        self._table.setColumnWidth(3, 72)
-        self._table.setColumnWidth(4, 55)
+        self._table.setColumnWidth(0, 30)
+        self._table.setColumnWidth(1, 35)
+        self._table.setColumnWidth(2, 58)
+        self._table.setColumnWidth(3, 68)
+        self._table.setColumnWidth(4, 50)
+        self._table.setColumnWidth(5, 88)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.verticalHeader().setVisible(False)
@@ -315,7 +339,7 @@ class SpeedDetectionWindow(QMainWindow):
         right_layout.addWidget(hist_box, stretch=1)
 
         splitter.addWidget(right)
-        splitter.setSizes([900, 340])
+        splitter.setSizes([820, 460])
 
         # ---- Status bar ----
         self._status = QStatusBar()
@@ -348,6 +372,8 @@ class SpeedDetectionWindow(QMainWindow):
         self._btn_stop.clicked.connect(self._stop)
         self._btn_export.clicked.connect(self._export_csv)
         self._btn_save_video.toggled.connect(self._toggle_save_video)
+        self._btn_captures.toggled.connect(self._toggle_captures)
+        self._table.itemSelectionChanged.connect(self._on_table_selection)
 
     # ------------------------------------------------------------------
     # Actions utilisateur
@@ -389,6 +415,8 @@ class SpeedDetectionWindow(QMainWindow):
         self._progress.setValue(0)
         self._btn_export.setEnabled(False)
 
+        self._row_photos.clear()
+
         self._worker = VideoWorker(
             video_path=self._video_path,
             line1_y=self._spin_line1.value(),
@@ -398,6 +426,7 @@ class SpeedDetectionWindow(QMainWindow):
             speed_limit_kmh=self._spin_limit.value(),
             conf=self._spin_conf.value(),
             output_path=self._output_path,
+            captures_dir=self._captures_dir,
         )
 
         self._thread = QThread()
@@ -457,6 +486,23 @@ class SpeedDetectionWindow(QMainWindow):
             self._output_path = None
             self._btn_save_video.setText("Sauver vidéo")
 
+    def _toggle_captures(self, checked: bool) -> None:
+        if checked:
+            if not hasattr(self, "_video_path"):
+                self._btn_captures.setChecked(False)
+                self._status.showMessage("Ouvrez d'abord une vidéo.", 3000)
+                return
+            from datetime import datetime as _dt  # noqa: PLC0415
+            video_p = Path(self._video_path)
+            session_ts = _dt.now().strftime("%Y-%m-%d_%H%M%S")
+            captures_dir = video_p.parent / "captures" / f"{video_p.stem}_{session_ts}"
+            self._captures_dir = str(captures_dir)
+            self._btn_captures.setText(f"📷 {captures_dir.name}")
+            self._status.showMessage(f"Captures → {captures_dir}", 4000)
+        else:
+            self._captures_dir = None
+            self._btn_captures.setText("📷 Captures")
+
     def _export_csv(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self, "Exporter les résultats", "vitesses.csv", "CSV (*.csv)"
@@ -465,18 +511,21 @@ class SpeedDetectionWindow(QMainWindow):
             return
 
         import csv as csv_mod  # noqa: PLC0415
-        fieldnames = ["no", "track_id", "type_vehicule", "heure_passage", "speed_kmh", "alerte"]
+        fieldnames = ["no", "track_id", "type_vehicule", "heure_passage", "speed_kmh", "plaque", "photo_path", "alerte"]
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv_mod.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for row in range(self._table.rowCount()):
+                photo = self._row_photos[row] if row < len(self._row_photos) else ""
                 writer.writerow({
                     "no": self._table.item(row, 0).text(),
                     "track_id": self._table.item(row, 1).text(),
                     "type_vehicule": self._table.item(row, 2).text(),
                     "heure_passage": self._table.item(row, 3).text(),
                     "speed_kmh": self._table.item(row, 4).text(),
-                    "alerte": self._table.item(row, 5).text(),
+                    "plaque": self._table.item(row, 5).text(),
+                    "photo_path": photo,
+                    "alerte": self._table.item(row, 6).text(),
                 })
         self._status.showMessage(f"CSV exporté → {path}", 4000)
 
@@ -487,8 +536,18 @@ class SpeedDetectionWindow(QMainWindow):
     def _on_frame(self, qimg: QImage) -> None:
         self._display_qimage(qimg)
 
-    def _on_result(self, track_id: int, speed_kmh: float, timestamp_s: float, vehicle_type: str, wall_time: str) -> None:
+    def _on_result(
+        self,
+        track_id: int,
+        speed_kmh: float,
+        timestamp_s: float,
+        vehicle_type: str,
+        wall_time: str,
+        photo_path: str,
+        plate_text: str,
+    ) -> None:
         self._speeds.append(speed_kmh)
+        self._row_photos.append(photo_path)
         limit = self._spin_limit.value()
         is_alert = limit > 0 and speed_kmh > limit
         if is_alert:
@@ -505,40 +564,63 @@ class SpeedDetectionWindow(QMainWindow):
                 "color: #00e676; background: #0d0d1a; border-radius: 8px; padding: 12px;"
             )
 
-        # Tableau historique — 6 colonnes : N°, ID, Type, Heure, km/h, Alerte
+        # Tableau historique — 7 colonnes : N°, ID, Type, Heure, km/h, Plaque, Alerte
         row = self._table.rowCount()
         self._table.insertRow(row)
 
-        num_item = QTableWidgetItem(str(row + 1))
-        num_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, 0, num_item)
+        for col, text, align in [
+            (0, str(row + 1), True),
+            (1, str(track_id), True),
+            (2, vehicle_type, True),
+            (3, wall_time, True),
+            (4, f"{speed_kmh:.1f}", True),
+            (5, plate_text, True),
+            (6, "⚠ OUI" if is_alert else "", True),
+        ]:
+            item = QTableWidgetItem(text)
+            if align:
+                item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+            if is_alert and col in (4, 6):
+                item.setForeground(QColor("#ff1744"))
+            self._table.setItem(row, col, item)
 
-        id_item = QTableWidgetItem(str(track_id))
-        id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, 1, id_item)
-
-        type_item = QTableWidgetItem(vehicle_type)
-        type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, 2, type_item)
-
-        time_item = QTableWidgetItem(wall_time)
-        time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._table.setItem(row, 3, time_item)
-
-        speed_item = QTableWidgetItem(f"{speed_kmh:.1f}")
-        speed_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        if is_alert:
-            speed_item.setForeground(QColor("#ff1744"))
-        self._table.setItem(row, 4, speed_item)
-
-        alert_item = QTableWidgetItem("⚠ OUI" if is_alert else "")
-        alert_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
-        if is_alert:
-            alert_item.setForeground(QColor("#ff1744"))
-        self._table.setItem(row, 5, alert_item)
         self._table.scrollToBottom()
 
+        # Affiche la photo si disponible
+        if photo_path:
+            self._show_photo(photo_path)
+
         self._update_stats()
+
+    def _on_table_selection(self) -> None:
+        rows = self._table.selectedItems()
+        if not rows:
+            return
+        row = self._table.currentRow()
+        if 0 <= row < len(self._row_photos):
+            photo_path = self._row_photos[row]
+            if photo_path:
+                self._show_photo(photo_path)
+            else:
+                self._photo_preview.setText("Captures non activées\npour cette session")
+
+    def _show_photo(self, path: str) -> None:
+        """Charge et affiche une photo véhicule dans l'aperçu."""
+        from pathlib import Path as _Path  # noqa: PLC0415
+        if not _Path(path).exists():
+            self._photo_preview.setText(f"Photo introuvable :\n{_Path(path).name}")
+            return
+        pixmap = QPixmap(path)
+        if pixmap.isNull():
+            self._photo_preview.setText("Impossible de charger la photo")
+            return
+        scaled = pixmap.scaled(
+            self._photo_preview.width() - 8,
+            self._photo_preview.height() - 8,
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self._photo_preview.setPixmap(scaled)
 
     def _on_progress(self, idx: int, total: int) -> None:
         if total > 0:

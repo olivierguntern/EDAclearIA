@@ -62,6 +62,8 @@ class SpeedResult:
     timestamp_s: float
     vehicle_type: str = ""    # car, truck, bus, motorbike…
     wall_time: str = ""       # heure réelle HH:MM:SS au moment de la détection
+    photo_path: str = ""      # chemin du JPEG sauvegardé (vide si captures désactivées)
+    plate_text: str = ""      # numéro de plaque extrait par OCR (vide si non trouvé)
 
 
 class SpeedDetector:
@@ -86,6 +88,7 @@ class SpeedDetector:
         speed_limit_kmh: float = 50.0,
         conf: float = 0.4,
         display: bool = False,
+        captures_dir: Optional[str] = None,
     ) -> None:
         if line1_y == line2_y:
             raise ValueError("line1_y et line2_y doivent être différents.")
@@ -105,6 +108,27 @@ class SpeedDetector:
         self._stop_event = threading.Event()
         self._pause_event = threading.Event()
         self._pause_event.set()  # démarre non-pausé
+
+        # Captures : dossier de sauvegarde des photos et lecteur OCR
+        self._captures_dir: Optional[Path] = None
+        self._plate_reader = None
+        if captures_dir:
+            self._captures_dir = Path(captures_dir)
+            self._captures_dir.mkdir(parents=True, exist_ok=True)
+            self._plate_reader = self._init_plate_reader()
+
+    @staticmethod
+    def _init_plate_reader():
+        """Initialise le lecteur de plaques (si easyocr est installé)."""
+        try:
+            from src.plate_reader import PlateReader  # noqa: PLC0415
+            reader = PlateReader()
+            if not reader.available:
+                print("Info : easyocr non installé — lecture de plaques désactivée.")
+                print("       pip install easyocr  pour activer cette fonction.")
+            return reader
+        except Exception:  # noqa: BLE001
+            return None
 
     # ------------------------------------------------------------------
     # API principale
@@ -219,6 +243,58 @@ class SpeedDetector:
         return list(self._results)
 
     # ------------------------------------------------------------------
+    # Capture véhicule + OCR plaque
+    # ------------------------------------------------------------------
+
+    def _save_crop(
+        self,
+        frame: np.ndarray,
+        box: tuple,
+        track_id: int,
+        speed: float,
+        vehicle_type: str,
+        wall_time: str,
+    ) -> str:
+        """Sauvegarde le crop du véhicule en JPEG et retourne son chemin."""
+        if self._captures_dir is None:
+            return ""
+        try:
+            x1, y1, x2, y2 = box
+            h, w = frame.shape[:2]
+            margin = 15
+            crop = frame[
+                max(0, y1 - margin): min(h, y2 + margin),
+                max(0, x1 - margin): min(w, x2 + margin),
+            ]
+            if crop.size == 0:
+                return ""
+            n = len(self._results) + 1
+            safe_time = wall_time.replace(":", "")
+            plate_hint = ""  # sera vide avant OCR, nom de fichier mis à jour après si besoin
+            filename = f"vehicule_{n:03d}_{vehicle_type}_ID{track_id}_{speed:.0f}kmh_{safe_time}.jpg"
+            path = self._captures_dir / filename
+            cv2.imwrite(str(path), crop)
+            return str(path)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    def _read_plate(self, frame: np.ndarray, box: tuple) -> str:
+        """Lit la plaque depuis la bounding box dans la frame originale."""
+        if self._plate_reader is None:
+            return ""
+        try:
+            x1, y1, x2, y2 = box
+            h, w = frame.shape[:2]
+            margin = 5
+            crop = frame[
+                max(0, y1 - margin): min(h, y2 + margin),
+                max(0, x1 - margin): min(w, x2 + margin),
+            ]
+            return self._plate_reader.read_plate(crop)
+        except Exception:  # noqa: BLE001
+            return ""
+
+    # ------------------------------------------------------------------
     # Traitement par frame
     # ------------------------------------------------------------------
 
@@ -277,19 +353,29 @@ class SpeedDetector:
                     state.speed_kmh = round(speed, 1)
                     state.display_until = frame_idx + int(fps * 3)  # affiche 3 s
 
+                    _wall_time = datetime.now().strftime("%H:%M:%S")
+                    _photo = self._save_crop(
+                        frame, (x1, y1, x2, y2), track_id,
+                        state.speed_kmh, state.vehicle_type, _wall_time,
+                    )
+                    _plate = self._read_plate(frame, (x1, y1, x2, y2))
+
                     result = SpeedResult(
                         track_id=track_id,
                         speed_kmh=state.speed_kmh,
                         frame_detected=frame_idx,
                         timestamp_s=round(frame_idx / fps, 2),
                         vehicle_type=state.vehicle_type,
-                        wall_time=datetime.now().strftime("%H:%M:%S"),
+                        wall_time=_wall_time,
+                        photo_path=_photo,
+                        plate_text=_plate,
                     )
                     self._results.append(result)
+                    _plate_info = f"  plaque={_plate}" if _plate else ""
                     print(
                         f"  [ID {track_id}] {state.vehicle_type}  "
                         f"{state.speed_kmh} km/h  "
-                        f"(t={result.timestamp_s}s  {result.wall_time})"
+                        f"(t={result.timestamp_s}s  {_wall_time}){_plate_info}"
                     )
                     if result_callback:
                         result_callback(result)
@@ -339,7 +425,10 @@ class SpeedDetector:
 
     def _write_csv(self, path: str | Path) -> None:
         path = Path(path)
-        fieldnames = ["track_id", "type_vehicule", "heure_passage", "speed_kmh", "frame", "timestamp_s"]
+        fieldnames = [
+            "track_id", "type_vehicule", "heure_passage",
+            "speed_kmh", "plaque", "photo_path", "frame", "timestamp_s",
+        ]
         with path.open("w", newline="", encoding="utf-8") as f:
             writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
@@ -349,6 +438,8 @@ class SpeedDetector:
                     "type_vehicule": r.vehicle_type,
                     "heure_passage": r.wall_time,
                     "speed_kmh": r.speed_kmh,
+                    "plaque": r.plate_text,
+                    "photo_path": r.photo_path,
                     "frame": r.frame_detected,
                     "timestamp_s": r.timestamp_s,
                 })

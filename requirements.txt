@@ -8,5 +8,7 @@ pytest>=8.0
 # Détection de vitesse vidéo
 ultralytics>=8.2
 opencv-python>=4.9
+# Lecture de plaques d'immatriculation (optionnel — dégradation gracieuse si absent)
+easyocr>=1.7
 # Interface graphique
 PyQt6>=6.6

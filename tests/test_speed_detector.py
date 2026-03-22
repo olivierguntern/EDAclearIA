@@ -151,7 +151,7 @@ class TestCsvOutput:
 
         with csv_path.open() as f:
             headers = f.readline().strip().split(",")
-        assert headers == ["track_id", "type_vehicule", "heure_passage", "speed_kmh", "frame", "timestamp_s"]
+        assert headers == ["track_id", "type_vehicule", "heure_passage", "speed_kmh", "plaque", "photo_path", "frame", "timestamp_s"]
 
 
 # ---------------------------------------------------------------------------
