@@ -37,10 +37,10 @@ except ImportError as exc:
 class VideoWorker(QObject):
     """Tourne dans un QThread et émet des signaux vers le thread principal."""
 
-    frame_ready = pyqtSignal(QImage)                # frame annotée (BGR→RGB)
-    result_ready = pyqtSignal(int, float, float)    # (track_id, speed_kmh, timestamp_s)
-    progress_updated = pyqtSignal(int, int)         # (frame_idx, total_frames)
-    finished = pyqtSignal(int)                      # nb de mesures au total
+    frame_ready = pyqtSignal(QImage)                       # frame annotée (BGR→RGB)
+    result_ready = pyqtSignal(int, float, float, str, str) # (track_id, speed_kmh, timestamp_s, vehicle_type, wall_time)
+    progress_updated = pyqtSignal(int, int)                # (frame_idx, total_frames)
+    finished = pyqtSignal(int)                             # nb de mesures au total
     error_occurred = pyqtSignal(str)
 
     # Intervalle minimum entre deux frames affichées (s) → 30 fps max
@@ -128,7 +128,13 @@ class VideoWorker(QObject):
         self.progress_updated.emit(idx, total)
 
     def _on_result(self, result) -> None:
-        self.result_ready.emit(result.track_id, result.speed_kmh, result.timestamp_s)
+        self.result_ready.emit(
+            result.track_id,
+            result.speed_kmh,
+            result.timestamp_s,
+            result.vehicle_type,
+            result.wall_time,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -283,18 +289,24 @@ class SpeedDetectionWindow(QMainWindow):
         stats_layout = QVBoxLayout(stats_box)
         self._lbl_count = self._make_stat_label("Véhicules mesurés", "0")
         self._lbl_max = self._make_stat_label("Vitesse max", "-- km/h")
+        self._lbl_min = self._make_stat_label("Vitesse min", "-- km/h")
         self._lbl_avg = self._make_stat_label("Vitesse moyenne", "-- km/h")
         self._lbl_alerts = self._make_stat_label("Dépassements", "0")
-        for row in (self._lbl_count, self._lbl_max, self._lbl_avg, self._lbl_alerts):
+        for row in (self._lbl_count, self._lbl_max, self._lbl_min, self._lbl_avg, self._lbl_alerts):
             stats_layout.addLayout(row)
         right_layout.addWidget(stats_box)
 
         # Historique des mesures
         hist_box = QGroupBox("Historique des mesures")
         hist_layout = QVBoxLayout(hist_box)
-        self._table = QTableWidget(0, 4)
-        self._table.setHorizontalHeaderLabels(["ID", "km/h", "t (s)", "Alerte"])
+        self._table = QTableWidget(0, 6)
+        self._table.setHorizontalHeaderLabels(["N°", "ID", "Type", "Heure", "km/h", "Alerte"])
         self._table.horizontalHeader().setStretchLastSection(True)
+        self._table.setColumnWidth(0, 35)
+        self._table.setColumnWidth(1, 40)
+        self._table.setColumnWidth(2, 65)
+        self._table.setColumnWidth(3, 72)
+        self._table.setColumnWidth(4, 55)
         self._table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self._table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
         self._table.verticalHeader().setVisible(False)
@@ -453,15 +465,18 @@ class SpeedDetectionWindow(QMainWindow):
             return
 
         import csv as csv_mod  # noqa: PLC0415
+        fieldnames = ["no", "track_id", "type_vehicule", "heure_passage", "speed_kmh", "alerte"]
         with open(path, "w", newline="", encoding="utf-8") as f:
-            writer = csv_mod.DictWriter(f, fieldnames=["track_id", "speed_kmh", "timestamp_s", "alerte"])
+            writer = csv_mod.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for row in range(self._table.rowCount()):
                 writer.writerow({
-                    "track_id": self._table.item(row, 0).text(),
-                    "speed_kmh": self._table.item(row, 1).text(),
-                    "timestamp_s": self._table.item(row, 2).text(),
-                    "alerte": self._table.item(row, 3).text(),
+                    "no": self._table.item(row, 0).text(),
+                    "track_id": self._table.item(row, 1).text(),
+                    "type_vehicule": self._table.item(row, 2).text(),
+                    "heure_passage": self._table.item(row, 3).text(),
+                    "speed_kmh": self._table.item(row, 4).text(),
+                    "alerte": self._table.item(row, 5).text(),
                 })
         self._status.showMessage(f"CSV exporté → {path}", 4000)
 
@@ -472,7 +487,7 @@ class SpeedDetectionWindow(QMainWindow):
     def _on_frame(self, qimg: QImage) -> None:
         self._display_qimage(qimg)
 
-    def _on_result(self, track_id: int, speed_kmh: float, timestamp_s: float) -> None:
+    def _on_result(self, track_id: int, speed_kmh: float, timestamp_s: float, vehicle_type: str, wall_time: str) -> None:
         self._speeds.append(speed_kmh)
         limit = self._spin_limit.value()
         is_alert = limit > 0 and speed_kmh > limit
@@ -490,21 +505,37 @@ class SpeedDetectionWindow(QMainWindow):
                 "color: #00e676; background: #0d0d1a; border-radius: 8px; padding: 12px;"
             )
 
-        # Tableau historique
+        # Tableau historique — 6 colonnes : N°, ID, Type, Heure, km/h, Alerte
         row = self._table.rowCount()
         self._table.insertRow(row)
-        self._table.setItem(row, 0, QTableWidgetItem(str(track_id)))
+
+        num_item = QTableWidgetItem(str(row + 1))
+        num_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._table.setItem(row, 0, num_item)
+
+        id_item = QTableWidgetItem(str(track_id))
+        id_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._table.setItem(row, 1, id_item)
+
+        type_item = QTableWidgetItem(vehicle_type)
+        type_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._table.setItem(row, 2, type_item)
+
+        time_item = QTableWidgetItem(wall_time)
+        time_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._table.setItem(row, 3, time_item)
+
         speed_item = QTableWidgetItem(f"{speed_kmh:.1f}")
         speed_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if is_alert:
             speed_item.setForeground(QColor("#ff1744"))
-        self._table.setItem(row, 1, speed_item)
-        self._table.setItem(row, 2, QTableWidgetItem(f"{timestamp_s:.1f}"))
-        alert_item = QTableWidgetItem("OUI" if is_alert else "")
+        self._table.setItem(row, 4, speed_item)
+
+        alert_item = QTableWidgetItem("⚠ OUI" if is_alert else "")
         alert_item.setTextAlignment(Qt.AlignmentFlag.AlignCenter)
         if is_alert:
             alert_item.setForeground(QColor("#ff1744"))
-        self._table.setItem(row, 3, alert_item)
+        self._table.setItem(row, 5, alert_item)
         self._table.scrollToBottom()
 
         self._update_stats()
@@ -562,6 +593,7 @@ class SpeedDetectionWindow(QMainWindow):
         self._lbl_count._value_label.setText(str(count))  # type: ignore[attr-defined]
         if count:
             self._lbl_max._value_label.setText(f"{max(self._speeds):.1f} km/h")   # type: ignore[attr-defined]
+            self._lbl_min._value_label.setText(f"{min(self._speeds):.1f} km/h")   # type: ignore[attr-defined]
             self._lbl_avg._value_label.setText(f"{sum(self._speeds)/count:.1f} km/h")  # type: ignore[attr-defined]
         self._lbl_alerts._value_label.setText(str(self._alert_count))  # type: ignore[attr-defined]
 

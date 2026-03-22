@@ -16,7 +16,8 @@ from __future__ import annotations
 import csv
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -49,6 +50,7 @@ class _TrackState:
     speed_kmh: Optional[float] = None
     last_box: Optional[tuple] = None   # (x1, y1, x2, y2)
     display_until: int = 0             # frame jusqu'à laquelle afficher la vitesse
+    vehicle_type: str = ""             # classe YOLO (car, truck, bus…)
 
 
 @dataclass
@@ -58,6 +60,8 @@ class SpeedResult:
     speed_kmh: float
     frame_detected: int
     timestamp_s: float
+    vehicle_type: str = ""    # car, truck, bus, motorbike…
+    wall_time: str = ""       # heure réelle HH:MM:SS au moment de la détection
 
 
 class SpeedDetector:
@@ -254,6 +258,7 @@ class SpeedDetector:
 
                 state = self._tracks.setdefault(track_id, _TrackState())
                 state.last_box = (x1, y1, x2, y2)
+                state.vehicle_type = cls_name
 
                 # Franchissement ligne 1
                 if state.line1_frame is None and abs(cy - self.line1_y) < 15:
@@ -277,9 +282,15 @@ class SpeedDetector:
                         speed_kmh=state.speed_kmh,
                         frame_detected=frame_idx,
                         timestamp_s=round(frame_idx / fps, 2),
+                        vehicle_type=state.vehicle_type,
+                        wall_time=datetime.now().strftime("%H:%M:%S"),
                     )
                     self._results.append(result)
-                    print(f"  [ID {track_id}] {state.speed_kmh} km/h  (t={result.timestamp_s}s)")
+                    print(
+                        f"  [ID {track_id}] {state.vehicle_type}  "
+                        f"{state.speed_kmh} km/h  "
+                        f"(t={result.timestamp_s}s  {result.wall_time})"
+                    )
                     if result_callback:
                         result_callback(result)
 
@@ -328,12 +339,15 @@ class SpeedDetector:
 
     def _write_csv(self, path: str | Path) -> None:
         path = Path(path)
+        fieldnames = ["track_id", "type_vehicule", "heure_passage", "speed_kmh", "frame", "timestamp_s"]
         with path.open("w", newline="", encoding="utf-8") as f:
-            writer = csv.DictWriter(f, fieldnames=["track_id", "speed_kmh", "frame", "timestamp_s"])
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for r in self._results:
                 writer.writerow({
                     "track_id": r.track_id,
+                    "type_vehicule": r.vehicle_type,
+                    "heure_passage": r.wall_time,
                     "speed_kmh": r.speed_kmh,
                     "frame": r.frame_detected,
                     "timestamp_s": r.timestamp_s,
