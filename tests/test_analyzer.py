@@ -3,10 +3,11 @@
 import io
 from pathlib import Path
 
-import pandas as pd
 import pytest
 
-from src.analyzer import analyze
+pandas = pytest.importorskip("pandas", reason="pandas non installé — tests analyzer ignorés")
+
+from src.analyzer import analyze  # noqa: E402
 
 
 def test_analyze_runs(tmp_path: Path):

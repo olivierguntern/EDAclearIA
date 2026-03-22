@@ -33,6 +33,30 @@ except ImportError as exc:
 
 
 # ---------------------------------------------------------------------------
+# Fonctions utilitaires pures (testables sans Qt)
+# ---------------------------------------------------------------------------
+
+def _conf_label(val: int) -> str:
+    """Retourne le libellé de qualité pour une valeur de slider (10-90).
+
+    >>> _conf_label(20)
+    'Faible  (0.20)'
+    >>> _conf_label(40)
+    'Normale  (0.40)'
+    """
+    conf = val / 100.0
+    if val <= 29:
+        name = "Faible"
+    elif val <= 55:
+        name = "Normale"
+    elif val <= 75:
+        name = "Élevée"
+    else:
+        name = "Maximale"
+    return f"{name}  ({conf:.2f})"
+
+
+# ---------------------------------------------------------------------------
 # Worker thread — fait tourner SpeedDetector sans bloquer l'UI
 # ---------------------------------------------------------------------------
 
@@ -502,6 +526,9 @@ class SpeedDetectionWindow(QMainWindow):
         """Redessine les lignes virtuelles sur l'aperçu à chaque changement de spinbox."""
         if self._first_frame is None:
             return
+        # Ne pas écraser le flux vidéo live pendant le traitement
+        if self._thread is not None and self._thread.isRunning():
+            return
         import cv2  # noqa: PLC0415
         preview = self._first_frame.copy()
         h, w = preview.shape[:2]
@@ -577,7 +604,6 @@ class SpeedDetectionWindow(QMainWindow):
             self._worker.resume()
             self._btn_pause.setText("⏸  Pause")
             self._is_paused = False
-            self._process_start_time = time.monotonic()  # reset pour FPS
             self._status.showMessage("Traitement repris.")
         else:
             self._worker.pause()
@@ -643,20 +669,24 @@ class SpeedDetectionWindow(QMainWindow):
             "no", "track_id", "type_vehicule", "heure_passage",
             "speed_kmh", "plaque", "photo_path", "alerte",
         ]
+        def _cell(r: int, c: int) -> str:
+            item = self._table.item(r, c)
+            return item.text() if item is not None else ""
+
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv_mod.DictWriter(f, fieldnames=fieldnames)
             writer.writeheader()
             for row in range(self._table.rowCount()):
                 photo = self._row_photos[row] if row < len(self._row_photos) else ""
                 writer.writerow({
-                    "no":            self._table.item(row, 0).text(),
-                    "track_id":      self._table.item(row, 1).text(),
-                    "type_vehicule": self._table.item(row, 2).text(),
-                    "heure_passage": self._table.item(row, 3).text(),
-                    "speed_kmh":     self._table.item(row, 4).text(),
-                    "plaque":        self._table.item(row, 5).text(),
+                    "no":            _cell(row, 0),
+                    "track_id":      _cell(row, 1),
+                    "type_vehicule": _cell(row, 2),
+                    "heure_passage": _cell(row, 3),
+                    "speed_kmh":     _cell(row, 4),
+                    "plaque":        _cell(row, 5),
                     "photo_path":    photo,
-                    "alerte":        self._table.item(row, 6).text(),
+                    "alerte":        _cell(row, 6),
                 })
         self._status.showMessage(f"CSV exporté → {path}", 4000)
 
@@ -665,16 +695,7 @@ class SpeedDetectionWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_conf_changed(self, val: int) -> None:
-        conf = val / 100.0
-        if val <= 29:
-            name = "Faible"
-        elif val <= 55:
-            name = "Normale"
-        elif val <= 75:
-            name = "Élevée"
-        else:
-            name = "Maximale"
-        self._lbl_conf.setText(f"{name}  ({conf:.2f})")
+        self._lbl_conf.setText(_conf_label(val))
 
     # ------------------------------------------------------------------
     # Slots connectés au worker

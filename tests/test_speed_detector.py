@@ -180,3 +180,246 @@ class TestProcessVideoErrors:
         d = SpeedDetector(line1_y=300, line2_y=450, real_distance_m=8.0)
         with pytest.raises(RuntimeError, match="Impossible d'ouvrir"):
             d.process_video(fake_video)
+
+
+# ---------------------------------------------------------------------------
+# Helpers pour créer des mocks de bounding boxes YOLO
+# ---------------------------------------------------------------------------
+
+def _mock_box(x1: float, y1: float, x2: float, y2: float,
+              track_id: int, cls_id: int = 0) -> MagicMock:
+    """Crée un mock de bounding box YOLO avec les attributs nécessaires."""
+    box = MagicMock()
+    xyxy_item = MagicMock()
+    xyxy_item.tolist.return_value = [float(x1), float(y1), float(x2), float(y2)]
+    box.xyxy.__getitem__ = MagicMock(return_value=xyxy_item)
+    box.id = MagicMock()
+    box.id.__getitem__ = MagicMock(return_value=track_id)
+    box.cls = MagicMock()
+    box.cls.__getitem__ = MagicMock(return_value=cls_id)
+    return box
+
+
+def _setup_yolo_track(mock_yolo_inst: MagicMock, boxes: list) -> None:
+    """Configure mock_yolo_inst.track() pour retourner une liste de boxes."""
+    result_mock = MagicMock()
+    result_mock.boxes = boxes
+    mock_yolo_inst.track.return_value = [result_mock]
+
+
+# ---------------------------------------------------------------------------
+# Tests de _process_frame — logique de détection
+# ---------------------------------------------------------------------------
+
+class TestProcessFrame:
+    """Teste la logique interne de franchissement de lignes et calcul de vitesse."""
+
+    def test_no_detections_returns_annotated(self, mock_heavy_deps):
+        """Aucune détection → frame annotée retournée, _results vide."""
+        mock_yolo, mock_cv2 = mock_heavy_deps
+        result_mock = MagicMock()
+        result_mock.boxes = None
+        mock_yolo.track.return_value = [result_mock]
+
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=8.0)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        out = d._process_frame(frame, 0, 25.0)
+
+        assert len(d._results) == 0
+        assert out.shape == frame.shape
+
+    def test_non_vehicle_class_ignored(self, mock_heavy_deps):
+        """Classe 'person' (id=2) ne déclenche aucun enregistrement."""
+        mock_yolo, _ = mock_heavy_deps
+        # cls_id=2 → "person" (dans le mock names = {0:"car",1:"truck",2:"person"})
+        box = _mock_box(100, 190, 200, 215, track_id=1, cls_id=2)
+        _setup_yolo_track(mock_yolo, [box])
+
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=8.0)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        d._process_frame(frame, 5, 25.0)
+
+        assert len(d._tracks) == 0
+
+    def test_no_track_id_skipped(self, mock_heavy_deps):
+        """Véhicule sans ID de tracking (box.id is None) → ignoré."""
+        mock_yolo, _ = mock_heavy_deps
+        box = _mock_box(100, 190, 200, 215, track_id=1, cls_id=0)
+        box.id = None  # pas encore tracké
+        _setup_yolo_track(mock_yolo, [box])
+
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=8.0)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        d._process_frame(frame, 5, 25.0)
+
+        assert len(d._tracks) == 0
+
+    def test_line1_crossing_recorded(self, mock_heavy_deps):
+        """Centroïde proche de line1_y → line1_frame enregistré."""
+        mock_yolo, _ = mock_heavy_deps
+        # cy = (190+215)//2 = 202, line1_y=200 → |202-200|=2 < 15
+        box = _mock_box(100, 190, 200, 215, track_id=5, cls_id=0)
+        _setup_yolo_track(mock_yolo, [box])
+
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=8.0)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        d._process_frame(frame, 10, 25.0)
+
+        assert 5 in d._tracks
+        assert d._tracks[5].line1_frame == 10
+        assert d._tracks[5].line2_frame is None
+
+    def test_speed_calculated_on_line2_crossing(self, mock_heavy_deps):
+        """Franchissement L1 puis L2 → vitesse calculée, résultat ajouté."""
+        mock_yolo, _ = mock_heavy_deps
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        from src.speed_detector import SpeedDetector
+        # distance=10m, Δframes=18, fps=25 → v = (10/(18/25))*3.6 ≈ 50 km/h
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=10.0)
+
+        # Frame 10 : croise ligne1 (cy=202)
+        _setup_yolo_track(mock_yolo, [_mock_box(100, 190, 200, 215, track_id=7)])
+        d._process_frame(frame, 10, 25.0)
+        assert d._tracks[7].line1_frame == 10
+
+        # Frame 28 : croise ligne2 (cy = (388+415)//2 = 401)
+        _setup_yolo_track(mock_yolo, [_mock_box(100, 388, 200, 415, track_id=7)])
+        d._process_frame(frame, 28, 25.0)
+
+        assert len(d._results) == 1
+        assert d._tracks[7].line2_frame == 28
+        assert 49.0 <= d._results[0].speed_kmh <= 51.0
+        assert d._results[0].track_id == 7
+        assert d._results[0].vehicle_type == "car"
+
+    def test_result_callback_called(self, mock_heavy_deps):
+        """result_callback est appelé exactement une fois après le franchissement L2."""
+        mock_yolo, _ = mock_heavy_deps
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=10.0)
+        received = []
+
+        _setup_yolo_track(mock_yolo, [_mock_box(100, 190, 200, 215, track_id=3)])
+        d._process_frame(frame, 10, 25.0, result_callback=received.append)
+        assert len(received) == 0  # pas encore de vitesse
+
+        _setup_yolo_track(mock_yolo, [_mock_box(100, 388, 200, 415, track_id=3)])
+        d._process_frame(frame, 28, 25.0, result_callback=received.append)
+        assert len(received) == 1
+        assert received[0].track_id == 3
+
+    def test_no_double_count_same_vehicle(self, mock_heavy_deps):
+        """Un véhicule ne peut déclencher qu'une seule mesure même s'il reste visible."""
+        mock_yolo, _ = mock_heavy_deps
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=10.0)
+
+        # L1 crossing
+        _setup_yolo_track(mock_yolo, [_mock_box(100, 190, 200, 215, track_id=9)])
+        d._process_frame(frame, 10, 25.0)
+
+        # L2 crossing → résultat créé
+        _setup_yolo_track(mock_yolo, [_mock_box(100, 388, 200, 415, track_id=9)])
+        d._process_frame(frame, 28, 25.0)
+        assert len(d._results) == 1
+
+        # Encore près de L2 → pas de nouveau résultat
+        _setup_yolo_track(mock_yolo, [_mock_box(100, 390, 200, 412, track_id=9)])
+        d._process_frame(frame, 30, 25.0)
+        assert len(d._results) == 1  # toujours 1
+
+
+# ---------------------------------------------------------------------------
+# Tests de _save_crop
+# ---------------------------------------------------------------------------
+
+class TestSaveCrop:
+    def test_no_captures_dir_returns_empty(self, mock_heavy_deps):
+        """Sans captures_dir, _save_crop retourne toujours ""."""
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=8.0)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        result = d._save_crop(frame, (100, 100, 200, 200), 1, 50.0, "car", "12:00:00")
+        assert result == ""
+
+    def test_empty_crop_returns_empty(self, tmp_path, mock_heavy_deps):
+        """Crop hors-image (taille zéro) → ""."""
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(
+            line1_y=200, line2_y=400, real_distance_m=8.0,
+            captures_dir=str(tmp_path / "caps"),
+        )
+        # Box complètement en dessous du frame 100×100 → slice vide
+        frame = np.zeros((100, 100, 3), dtype=np.uint8)
+        result = d._save_crop(frame, (0, 200, 50, 300), 1, 50.0, "car", "12:00:00")
+        assert result == ""
+
+    def test_valid_box_returns_path_string(self, tmp_path, mock_heavy_deps):
+        """Crop valide → chemin de fichier retourné (cv2.imwrite mocké)."""
+        from src.speed_detector import SpeedDetector
+        caps_dir = tmp_path / "caps"
+        d = SpeedDetector(
+            line1_y=200, line2_y=400, real_distance_m=8.0,
+            captures_dir=str(caps_dir),
+        )
+        frame = np.ones((480, 640, 3), dtype=np.uint8) * 128
+        result = d._save_crop(frame, (50, 100, 200, 300), 1, 52.0, "car", "14:30:00")
+        assert isinstance(result, str)
+        assert len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# Tests de _read_plate sans lecteur
+# ---------------------------------------------------------------------------
+
+class TestReadPlate:
+    def test_no_plate_reader_returns_empty(self, mock_heavy_deps):
+        """Sans captures_dir, _plate_reader est None → retourne ""."""
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=8.0)
+        assert d._plate_reader is None
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        assert d._read_plate(frame, (100, 200, 200, 300)) == ""
+
+
+# ---------------------------------------------------------------------------
+# Tests CSV — cas limite
+# ---------------------------------------------------------------------------
+
+class TestCsvEdgeCases:
+    def test_write_csv_empty_results(self, tmp_path, mock_heavy_deps):
+        """CSV sans résultats → fichier créé avec uniquement les headers."""
+        from src.speed_detector import SpeedDetector
+        d = SpeedDetector(line1_y=200, line2_y=400, real_distance_m=8.0)
+        csv_path = tmp_path / "empty.csv"
+        d._write_csv(csv_path)
+
+        assert csv_path.exists()
+        with csv_path.open() as f:
+            lines = f.readlines()
+        assert len(lines) == 1  # seulement le header
+        assert "speed_kmh" in lines[0]
+
+
+# ---------------------------------------------------------------------------
+# Tests calibrate_from_frame
+# ---------------------------------------------------------------------------
+
+class TestCalibrate:
+    def test_missing_frame_raises(self, mock_heavy_deps):
+        """calibrate_from_frame avec image inexistante → FileNotFoundError."""
+        _, mock_cv2 = mock_heavy_deps
+        mock_cv2.imread.return_value = None  # simule fichier introuvable
+
+        from src.speed_detector import SpeedDetector
+        with pytest.raises(FileNotFoundError, match="introuvable"):
+            SpeedDetector.calibrate_from_frame("/tmp/__inexistant_frame_xyz__.jpg")
