@@ -5,3 +5,6 @@ seaborn>=0.13
 anthropic>=0.25
 jupyter>=1.0
 pytest>=8.0
+# Détection de vitesse vidéo
+ultralytics>=8.2
+opencv-python>=4.9
